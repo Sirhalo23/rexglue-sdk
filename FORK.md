@@ -18,3 +18,10 @@ release. It is not the official SDK; for anything else, use upstream.
 | Change | Area | Sent upstream |
 | --- | --- | --- |
 | The texture result exponent bias is read from fetch constant word 3, not word 4. With a LOD bias set, sampled colours were scaled by a power of two made out of that bias; Ridge Racer 6's track textures came out black. | Vulkan (`spirv_translator_fetch.cpp`) | not yet |
+| macOS source builds: the version lookup, the MoltenVK ICD path and the ImGui include path work from an SDK checkout used by a game project; MoltenVK is pinned to its upstream fix for 1x1 drawables after swapchain recreation (the picture shrank to one stretched pixel); the guest output pass enables primitive restart, which Metal requires for strip topologies (no effect on the four non-indexed vertices it draws elsewhere). By Alan Bradburne, from upstream PR #487. | macOS, Vulkan presenter, build | upstream PR #487 (open) |
+| `window_high_pixel_density` (default true, as before) can turn off SDL's high-density back buffer, so a Retina display does not get a back buffer twice the size in each direction. By Alan Bradburne, from upstream PR #487. | UI (SDL window) | upstream PR #487 (open) |
+
+The two changes from PR #487 were checked on Linux (Vulkan, llvmpipe): the
+game's loading screen draws normally with the rebuilt runtime and no
+validation errors are reported. They have not been tried on Windows or on a
+Mac by this project.
