@@ -202,7 +202,7 @@ if(REXGLUE_USE_VULKAN)
     add_subdirectory(vulkan-memory-allocator)
 
     if(APPLE)
-        # Build the loader and MoltenVK revisions shipped by the pinned SDK.
+        # Build the pinned loader and MoltenVK (SDK baseline plus macOS fixes).
         # They remain runtime-loaded; no Vulkan implementation is linked into
         # rexglue itself.
         set(BUILD_TESTS OFF CACHE BOOL "" FORCE)

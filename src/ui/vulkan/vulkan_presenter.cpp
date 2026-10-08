@@ -2589,6 +2589,9 @@ VkPipeline VulkanPresenter::CreateGuestOutputPaintPipeline(GuestOutputPaintEffec
   VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {};
   input_assembly_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
   input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  // This pass draws four non-indexed vertices, so restart cannot affect its
+  // geometry. Metal requires restart to be enabled for strip topologies.
+  input_assembly_state.primitiveRestartEnable = VK_TRUE;
 
   VkPipelineViewportStateCreateInfo viewport_state = {};
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
