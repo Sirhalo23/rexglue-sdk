@@ -31,6 +31,11 @@ REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(window_high_pixel_density, true, "UI/Window",
+                    "Use a high-density back buffer on Retina/HiDPI displays. "
+                    "Disable to reduce presentation pixel count without changing the display mode")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 // kHotReload (default): Window::SetFullscreen can be applied live, so the
 // change callback registered in ReXApp::SetupPresentation keeps the window
 // in sync whenever this cvar is changed at runtime.
