@@ -362,6 +362,11 @@ class Presenter {
   // multiple at the same time, and it should acquire the latest guest output
   // image via ConsumeGuestOutput.
   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
+  // Blocks until the next vertical blank of the display that shows the
+  // surface, so the guest's vertical blank can be paced by the real one
+  // (vsync_to_display). Callable from any thread. Returns false at once when
+  // the backend or the current surface cannot do that.
+  virtual bool WaitForDisplayVerticalBlank() { return false; }
   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
     return guest_output_paint_config_;
   }

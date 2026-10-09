@@ -13,6 +13,7 @@
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include <rex/math.h>
@@ -86,6 +87,7 @@ class D3D12Presenter final : public Presenter {
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
 
   bool CaptureGuestOutput(RawImage& image_out) override;
+  bool WaitForDisplayVerticalBlank() override;
 
   void AwaitUISubmissionCompletionFromUIThread(UINT64 submission_index) {
     ui_submission_tracker_.AwaitSubmissionCompletion(submission_index);
@@ -279,6 +281,13 @@ class D3D12Presenter final : public Presenter {
   // particular on the Windows 10 version and hardware support), primarily for
   // variable refresh rate support.
   bool dxgi_supports_tearing_ = false;
+
+  // The output (monitor) showing the swap chain, for WaitForDisplayVerticalBlank
+  // from other threads. Refreshed on the painting thread from time to time, as
+  // the window may be moved to another monitor.
+  std::mutex vblank_output_mutex_;
+  Microsoft::WRL::ComPtr<IDXGIOutput> vblank_output_;
+  uint32_t presents_since_output_refresh_ = 0;
 
   // Static objects for guest output presentation, used only when painting the
   // main target (can be destroyed only after awaiting main target usage
