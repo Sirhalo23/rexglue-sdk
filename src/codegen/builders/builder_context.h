@@ -25,6 +25,17 @@ namespace rex::codegen {
 
 class FunctionNode;
 
+// Lines emitted around a call to an SEH funclet (a function that shares its
+// owner's registers). FunctionGraph replaces them, once the function's locals
+// are all known, with copies of every localized register into ctx and back.
+inline constexpr std::string_view kFuncletHandOverMarker = "//@rex funclet hand-over";
+inline constexpr std::string_view kFuncletTakeBackMarker = "//@rex funclet take-back";
+
+struct RecompilerLocalVariables;
+
+// Replaces the funclet markers in a function body (see above).
+std::string ExpandFuncletMarkers(const std::string& body, const RecompilerLocalVariables& locals);
+
 struct RecompilerLocalVariables {
   bool ctr{};
   bool xer{};
@@ -112,7 +123,9 @@ struct BuilderContext {
    * @brief Whether non-volatiles may be localized in the current function.
    * False when the function shares registers with an intra-function bl partner.
    */
+  bool mayLocalize() const;
   bool localizeNonVolatiles() const;
+  bool localizeNonArguments() const;
 
   /**
    * @brief Get expression for general-purpose register access.
