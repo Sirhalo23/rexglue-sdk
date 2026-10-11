@@ -640,6 +640,13 @@ void VulkanCommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first
   }
 }
 
+void VulkanCommandProcessor::FlushShaderStorage() {
+  CommandProcessor::FlushShaderStorage();
+  if (pipeline_cache_) {
+    pipeline_cache_->FlushShaderStorage();
+  }
+}
+
 void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                      uint32_t title_id, bool blocking) {
   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);

@@ -20,7 +20,9 @@
 #include <cstring>
 
 REXCVAR_DEFINE_STRING(perf_log_csv, "", "Perf",
-                      "Path to write per-frame CSV log (empty = disabled)");
+                      "Path to write CPU guest-swap timing CSV, including Release "
+                      "(empty = disabled; not GPU/display frame timing)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex::perf {
 

@@ -22,6 +22,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -68,6 +69,8 @@ class VulkanPipelineCache {
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                bool blocking);
   void ShutdownShaderStorage();
+  // May run concurrently with command processing, but not cache setup/teardown.
+  void FlushShaderStorage();
   void EndSubmission();
 
   VulkanShader* LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
@@ -367,6 +370,14 @@ class VulkanPipelineCache {
   // available.
   bool EnsurePipelineCreated(const PipelineCreationArguments& creation_arguments,
                              VkShaderModule fragment_shader_override = VK_NULL_HANDLE);
+  void InitializeDriverPipelineCache(const std::filesystem::path& path);
+  void SaveDriverPipelineCache();
+  // Pipeline creation shares the driver cache concurrently. Loading, saving and
+  // destruction take exclusive access, without serializing compiler workers.
+  std::shared_mutex driver_pipeline_cache_mutex_;
+  VkPipelineCache driver_pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path driver_pipeline_cache_path_;
+
   void CreationThread(size_t thread_index);
   void CreateQueuedPipelinesOnProcessorThread();
   void ProcessDeferredPipelineDestructions(bool force_all);
@@ -454,6 +465,8 @@ class VulkanPipelineCache {
   std::deque<PipelineStoredDescription> storage_write_pipeline_queue_;
   bool storage_write_flush_shaders_ = false;
   bool storage_write_flush_pipelines_ = false;
+  uint64_t storage_write_flush_requested_ = 0;
+  uint64_t storage_write_flush_completed_ = 0;
   bool storage_write_thread_shutdown_ = false;
   std::unique_ptr<rex::thread::Thread> storage_write_thread_;
 

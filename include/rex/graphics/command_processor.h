@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -114,6 +115,11 @@ class CommandProcessor {
   // awaited.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking);
+
+  // May run on the UI thread before a hard exit. Implementations synchronize
+  // cache access internally without waiting for command processing/presentation.
+  // Initialization and shutdown must not run concurrently.
+  virtual void FlushShaderStorage();
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);
@@ -244,6 +250,14 @@ class CommandProcessor {
   std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
+
+  // Optional CPU timing CSV, available in Release without per-draw counters.
+  // Accessed by the GPU worker; closed only after the worker has stopped.
+  std::FILE* perf_csv_file_ = nullptr;
+  uint64_t perf_csv_frequency_ = 0;
+  uint64_t perf_csv_first_tick_ = 0;
+  uint64_t perf_csv_last_tick_ = 0;
+  uint64_t perf_csv_frame_ = 0;
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;

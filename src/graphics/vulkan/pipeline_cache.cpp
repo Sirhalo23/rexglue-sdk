@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -48,11 +49,16 @@
 #include <rex/math.h>
 #include <rex/types.h>
 #include <rex/ui/vulkan/util.h>
+#include <rex/ui/vulkan/instance.h>
 
 REXCVAR_DEFINE_INT32(
     vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
     "Number of pipeline creation threads for Vulkan async pipeline creation (-1 for auto)")
     .range(-1, 32)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(vulkan_driver_pipeline_cache, true, "GPU/Vulkan",
+                    "Reuse and persist driver-generated Vulkan pipeline data")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
@@ -288,6 +294,8 @@ VulkanPipelineCache::~VulkanPipelineCache() {
 bool VulkanPipelineCache::Initialize() {
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
 
+  InitializeDriverPipelineCache({});
+
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
 
@@ -388,6 +396,145 @@ bool VulkanPipelineCache::Initialize() {
   return true;
 }
 
+namespace {
+// A small envelope detects interrupted writes and corrupt payloads before they
+// reach the driver. The Vulkan header below also checks the device and UUID.
+constexpr uint64_t kDriverCacheMagic = 0x314348434B565852;  // Private cache envelope, version 1.
+constexpr size_t kDriverCacheMaxBytes = size_t(256) * 1024 * 1024;
+struct DriverCacheFileHeader {
+  uint64_t magic;
+  uint64_t size;
+  uint64_t hash;
+};
+}  // namespace
+
+void VulkanPipelineCache::InitializeDriverPipelineCache(const std::filesystem::path& path) {
+  if (!REXCVAR_GET(vulkan_driver_pipeline_cache)) {
+    return;
+  }
+  const auto* vulkan_device = command_processor_.GetVulkanDevice();
+  const auto& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  std::unique_lock<std::shared_mutex> lock(driver_pipeline_cache_mutex_);
+  driver_pipeline_cache_path_ = path;
+
+  std::vector<uint8_t> data;
+  if (!path.empty()) {
+    if (FILE* file = rex::filesystem::OpenFile(path, "rb")) {
+      DriverCacheFileHeader file_header = {};
+      if (fread(&file_header, sizeof(file_header), 1, file) == 1 &&
+          file_header.magic == kDriverCacheMagic &&
+          file_header.size >= sizeof(VkPipelineCacheHeaderVersionOne) &&
+          file_header.size <= kDriverCacheMaxBytes) {
+        data.resize(size_t(file_header.size));
+        if (fread(data.data(), 1, data.size(), file) != data.size() || fgetc(file) != EOF ||
+            XXH3_64bits(data.data(), data.size()) != file_header.hash) {
+          data.clear();
+        }
+      }
+      fclose(file);
+      if (!data.empty()) {
+        VkPipelineCacheHeaderVersionOne header;
+        std::memcpy(&header, data.data(), sizeof(header));
+        VkPhysicalDeviceProperties properties;
+        vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(
+            vulkan_device->physical_device(), &properties);
+        if (header.headerSize < sizeof(header) || header.headerSize > data.size() ||
+            header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+            header.vendorID != properties.vendorID || header.deviceID != properties.deviceID ||
+            std::memcmp(header.pipelineCacheUUID, properties.pipelineCacheUUID, VK_UUID_SIZE)) {
+          data.clear();
+        }
+      }
+      if (data.empty()) {
+        REXGPU_WARN("Ignoring invalid or incompatible Vulkan driver cache: {}",
+                    rex::path_to_utf8(path));
+      }
+    }
+  }
+
+  VkPipelineCacheCreateInfo create_info = {};
+  create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  // Leave EXTERNALLY_SYNCHRONIZED unset so compiler threads may share this cache.
+  create_info.initialDataSize = data.size();
+  create_info.pInitialData = data.empty() ? nullptr : data.data();
+  VkPipelineCache cache = VK_NULL_HANDLE;
+  VkResult result = dfn.vkCreatePipelineCache(device, &create_info, nullptr, &cache);
+  if (result != VK_SUCCESS && !data.empty()) {
+    REXGPU_WARN("Vulkan driver rejected its persistent cache ({}); retrying empty",
+                int32_t(result));
+    data.clear();
+    create_info.initialDataSize = 0;
+    create_info.pInitialData = nullptr;
+    result = dfn.vkCreatePipelineCache(device, &create_info, nullptr, &cache);
+  }
+  if (result != VK_SUCCESS) {
+    REXGPU_WARN("Failed to create Vulkan driver pipeline cache ({})", int32_t(result));
+    return;
+  }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineCache, device,
+                                         driver_pipeline_cache_);
+  driver_pipeline_cache_ = cache;
+  if (!data.empty()) {
+    REXGPU_INFO("Loaded Vulkan driver pipeline cache: {} bytes", data.size());
+  }
+}
+
+void VulkanPipelineCache::SaveDriverPipelineCache() {
+  std::unique_lock<std::shared_mutex> lock(driver_pipeline_cache_mutex_);
+  if (driver_pipeline_cache_ == VK_NULL_HANDLE || driver_pipeline_cache_path_.empty()) {
+    return;
+  }
+  const auto* vulkan_device = command_processor_.GetVulkanDevice();
+  const auto& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  size_t size = 0;
+  if (dfn.vkGetPipelineCacheData(device, driver_pipeline_cache_, &size, nullptr) != VK_SUCCESS ||
+      size < sizeof(VkPipelineCacheHeaderVersionOne) || size > kDriverCacheMaxBytes) {
+    return;
+  }
+  std::vector<uint8_t> data(size);
+  // The exclusive lock keeps workers from growing the cache between queries.
+  if (dfn.vkGetPipelineCacheData(device, driver_pipeline_cache_, &size, data.data()) !=
+          VK_SUCCESS ||
+      size < sizeof(VkPipelineCacheHeaderVersionOne) || size > data.size()) {
+    return;
+  }
+  data.resize(size);
+  std::error_code error;
+  std::filesystem::create_directories(driver_pipeline_cache_path_.parent_path(), error);
+  if (error) {
+    REXGPU_WARN("Unable to create Vulkan driver cache directory: {}", error.message());
+    return;
+  }
+  auto temporary_path = driver_pipeline_cache_path_;
+  temporary_path +=
+      fmt::format(".{}.tmp", std::chrono::steady_clock::now().time_since_epoch().count());
+  FILE* file = rex::filesystem::OpenFile(temporary_path, "wb");
+  if (!file) {
+    REXGPU_WARN("Unable to open Vulkan driver cache for writing: {}",
+                rex::path_to_utf8(temporary_path));
+    return;
+  }
+  DriverCacheFileHeader header = {kDriverCacheMagic, uint64_t(data.size()),
+                                  XXH3_64bits(data.data(), data.size())};
+  bool written = fwrite(&header, sizeof(header), 1, file) == 1 &&
+                 fwrite(data.data(), 1, data.size(), file) == data.size();
+  written = fclose(file) == 0 && written;
+  if (written) {
+    // Publish only a complete cache, keeping the previous file on write failure.
+    std::filesystem::rename(temporary_path, driver_pipeline_cache_path_, error);
+    written = !error;
+  }
+  if (!written) {
+    REXGPU_WARN("Unable to save Vulkan driver pipeline cache: {}",
+                rex::path_to_utf8(driver_pipeline_cache_path_));
+    std::filesystem::remove(temporary_path, error);
+  } else {
+    REXGPU_INFO("Saved Vulkan driver pipeline cache: {} bytes", data.size());
+  }
+}
+
 void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                   uint32_t title_id, bool blocking) {
   ShutdownShaderStorage();
@@ -410,6 +557,14 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
 
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+
+  // The shareable storage contains guest shaders and pipeline descriptions,
+  // not driver-generated shader data. Keep the latter separate and device-specific.
+  const auto& device_properties = command_processor_.GetVulkanDevice()->properties();
+  InitializeDriverPipelineCache(shader_storage_root / "vulkan" /
+                                fmt::format("{:08X}.{:08X}.{:08X}.{:08X}.cache", title_id,
+                                            device_properties.vendorID, device_properties.deviceID,
+                                            device_properties.driverVersion));
 
   // Initialize the pipeline storage stream - read pipeline descriptions and
   // collect used shader modifications to translate.
@@ -709,12 +864,37 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
   storage_write_flush_shaders_ = false;
   storage_write_flush_pipelines_ = false;
   storage_write_thread_shutdown_ = false;
+  storage_write_flush_requested_ = 0;
+  storage_write_flush_completed_ = 0;
   storage_write_thread_ = rex::thread::Thread::Create({}, [this]() { StorageWriteThread(); });
   assert_not_null(storage_write_thread_);
   storage_write_thread_->set_name("Vulkan Storage writer");
 }
 
+void VulkanPipelineCache::FlushShaderStorage() {
+  // Only the driver cache mutex is required: this neither submits GPU work nor
+  // waits for the command processor, so it is safe during UI window closing.
+  SaveDriverPipelineCache();
+  if (!storage_write_thread_) {
+    return;
+  }
+  std::unique_lock<std::mutex> lock(storage_write_request_lock_);
+  const uint64_t requested = ++storage_write_flush_requested_;
+  storage_write_flush_shaders_ = true;
+  storage_write_flush_pipelines_ = true;
+  storage_write_request_cond_.notify_all();
+  // TerminateTitle can leave guest stragglers alive. Never let their continued
+  // output keep the UI waiting indefinitely for the storage queues to empty.
+  if (!storage_write_request_cond_.wait_for(lock, std::chrono::seconds(2), [this, requested]() {
+        return storage_write_flush_completed_ >= requested;
+      })) {
+    REXGPU_WARN("Timed out flushing guest shader storage before exit");
+  }
+}
+
 void VulkanPipelineCache::ShutdownShaderStorage() {
+  FlushShaderStorage();
+  driver_pipeline_cache_path_.clear();
   if (storage_write_thread_) {
     {
       std::lock_guard<std::mutex> lock(storage_write_request_lock_);
@@ -821,6 +1001,12 @@ void VulkanPipelineCache::Shutdown() {
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  {
+    std::unique_lock<std::shared_mutex> lock(driver_pipeline_cache_mutex_);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineCache, device,
+                                           driver_pipeline_cache_);
+  }
 
   ProcessDeferredPipelineDestructions(true);
 
@@ -3480,8 +3666,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-                                                         &pipeline_create_info, nullptr, &pipeline);
+  VkResult create_result;
+  {
+    std::shared_lock<std::shared_mutex> lock(driver_pipeline_cache_mutex_);
+    create_result = dfn.vkCreateGraphicsPipelines(device, driver_pipeline_cache_, 1,
+                                                  &pipeline_create_info, nullptr, &pipeline);
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()
@@ -3670,7 +3860,14 @@ void VulkanPipelineCache::StorageWriteThread() {
         flush_pipelines = true;
       }
       if (!shader && !write_pipeline) {
-        storage_write_request_cond_.wait(lock);
+        if (!flush_shaders && !flush_pipelines) {
+          // Acknowledge only after queued writes and the actual fflush calls
+          // above have finished. Waking alone must not count as a flush.
+          storage_write_flush_completed_ = storage_write_flush_requested_;
+          storage_write_request_cond_.notify_all();
+          storage_write_request_cond_.wait(lock);
+        }
+        // Pending flushes run at the top of the loop before sleeping.
         continue;
       }
     }
