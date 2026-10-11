@@ -19,6 +19,7 @@
 
 #include <rex/cvar.h>
 #include <rex/dbg.h>
+#include <rex/filesystem.h>
 #include <rex/perf/counter.h>
 #include <rex/chrono/clock.h>
 #include <rex/graphics/command_processor.h>
@@ -80,6 +81,8 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                     "pipelines are being prepared.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DECLARE(std::string, perf_log_csv);
+
 namespace rex::graphics {
 
 using namespace rex::graphics::xenos;
@@ -113,7 +116,9 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
   assert_not_null(write_ptr_index_event_);
 }
 
-CommandProcessor::~CommandProcessor() = default;
+CommandProcessor::~CommandProcessor() {
+  if (perf_csv_file_) std::fclose(perf_csv_file_);
+}
 
 bool CommandProcessor::Initialize() {
   // Initialize the gamma ramps to their default (linear) values - taken from
@@ -135,6 +140,20 @@ bool CommandProcessor::Initialize() {
     }
   }
 
+  // This opt-in path intentionally does not enable Release's per-draw atomic
+  // counters. XE_SWAP intervals measure guest submission pacing, not GPU time.
+  const auto csv_path = REXCVAR_GET(perf_log_csv);
+  if (!csv_path.empty()) {
+    perf_csv_file_ = rex::filesystem::OpenFile(rex::to_path(csv_path), "w");
+    if (perf_csv_file_) {
+      std::fputs("frame_index,elapsed_us,frame_time_us,issue_swap_cpu_us\n", perf_csv_file_);
+      perf_csv_frequency_ = rex::chrono::Clock::QueryHostTickFrequency();
+      perf_csv_first_tick_ = perf_csv_last_tick_ = perf_csv_frame_ = 0;
+    } else {
+      REXLOG_WARN("perf: failed to open CPU frame CSV: {}", csv_path);
+    }
+  }
+
   worker_running_ = true;
   worker_thread_ = system::object_ref<system::XHostThread>(
       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
@@ -152,10 +171,22 @@ void CommandProcessor::Shutdown() {
   write_ptr_index_event_->Set();
   worker_thread_->Wait(0, 0, 0, nullptr);
   worker_thread_.reset();
+  if (perf_csv_file_) {
+    std::fclose(perf_csv_file_);
+    perf_csv_file_ = nullptr;
+  }
 }
 
 void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                uint32_t title_id, bool blocking) {}
+
+void CommandProcessor::FlushShaderStorage() {
+  // Stream lifetime is fixed between initialization and shutdown; this hook
+  // must not overlap either. stdio synchronizes fflush with worker writes.
+  if (perf_csv_file_) {
+    std::fflush(perf_csv_file_);
+  }
+}
 
 void CommandProcessor::CallInThread(std::function<void()> fn) {
   if (pending_fns_.empty() && system::XThread::IsInThread(worker_thread_.get())) {
@@ -958,7 +989,23 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
-  IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  if (perf_csv_file_) {
+    const uint64_t start = rex::chrono::Clock::QueryHostTickCount();
+    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+    const uint64_t end = rex::chrono::Clock::QueryHostTickCount();
+    if (!perf_csv_frame_) perf_csv_first_tick_ = start;
+    const auto microseconds = [this](uint64_t ticks) {
+      return uint64_t(double(ticks) * 1000000.0 / double(perf_csv_frequency_));
+    };
+    std::fprintf(perf_csv_file_, "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+                 perf_csv_frame_, microseconds(start - perf_csv_first_tick_),
+                 perf_csv_frame_ ? microseconds(start - perf_csv_last_tick_) : 0,
+                 microseconds(end - start));
+    perf_csv_last_tick_ = start;
+    if (++perf_csv_frame_ % 60 == 0) std::fflush(perf_csv_file_);
+  } else {
+    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  }
 
   ++counter_;
   return true;

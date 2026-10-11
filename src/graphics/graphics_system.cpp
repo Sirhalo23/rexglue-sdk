@@ -364,6 +364,14 @@ void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_
   }
 }
 
+void GraphicsSystem::FlushShaderStorage() {
+  if (command_processor_) {
+    // Do not dispatch to the worker: it may be waiting for UI presentation while
+    // the UI thread closes the window. Backends synchronize the cache directly.
+    command_processor_->FlushShaderStorage();
+  }
+}
+
 void GraphicsSystem::Pause() {
   paused_ = true;
   command_processor_->Pause();

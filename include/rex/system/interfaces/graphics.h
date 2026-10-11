@@ -79,6 +79,12 @@ class IGraphicsSystem {
     (void)blocking;
   }
 
+  // Flush persistent shader caches without tearing down graphics. Called on
+  // the UI thread before a hard exit; implementations must synchronize their
+  // own cache access and must not wait for the GPU command worker or presenter.
+  // Must not overlap graphics initialization or shutdown.
+  virtual void FlushShaderStorage() {}
+
   // One-shot convenience for callers that don't care about the split.
   X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
                  ui::WindowedAppContext* app_context, bool with_presentation) {
