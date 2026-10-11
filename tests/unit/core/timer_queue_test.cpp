@@ -18,10 +18,11 @@ using Clock = rex::thread::TimerQueueWaitItem::clock;
 struct ScopedTimer {
   std::weak_ptr<rex::thread::TimerQueueWaitItem> item;
   ~ScopedTimer() {
-    if (auto live = item.lock()) live->Disarm();
+    if (auto live = item.lock())
+      live->Disarm();
   }
 };
-}
+}  // namespace
 
 TEST_CASE("timer insertion interrupts an idle or later deadline wait", "[timer_queue]") {
   ScopedTimer later;
@@ -34,11 +35,12 @@ TEST_CASE("timer insertion interrupts an idle or later deadline wait", "[timer_q
   auto promise = std::make_shared<std::promise<Clock::time_point>>();
   auto result = promise->get_future();
   auto due = Clock::now() + 10ms;
-  ScopedTimer timer{QueueTimerOnce(
-      [promise](void*) { promise->set_value(Clock::now()); }, nullptr, due)};
+  ScopedTimer timer{
+      QueueTimerOnce([promise](void*) { promise->set_value(Clock::now()); }, nullptr, due)};
   auto status = result.wait_for(500ms);
   CHECK(status == std::future_status::ready);
-  if (status == std::future_status::ready) CHECK(result.get() >= due);
+  if (status == std::future_status::ready)
+    CHECK(result.get() >= due);
 }
 
 TEST_CASE("a recurring timer can disarm itself", "[timer_queue]") {
@@ -48,9 +50,11 @@ TEST_CASE("a recurring timer can disarm itself", "[timer_queue]") {
   auto result = called->get_future();
   ScopedTimer timer{QueueTimerRecurring(
       [assigned, called](void*) {
-        if (auto live = assigned.get().lock()) live->Disarm();
+        if (auto live = assigned.get().lock())
+          live->Disarm();
         called->set_value();
-      }, nullptr, Clock::now(), 1ms)};
+      },
+      nullptr, Clock::now(), 1ms)};
   item->set_value(timer.item);
   CHECK(result.wait_for(500ms) == std::future_status::ready);
   // A second callback would set the promise twice and fail the process.
@@ -66,7 +70,8 @@ TEST_CASE("disarming waits for an active timer callback", "[timer_queue]") {
       [entered, release_result](void*) {
         entered->set_value();
         release_result.wait();
-      }, nullptr, Clock::now())};
+      },
+      nullptr, Clock::now())};
   auto status = entered_result.wait_for(500ms);
   CHECK(status == std::future_status::ready);
   if (status != std::future_status::ready) {
@@ -100,17 +105,18 @@ TEST_CASE("timer queue wakes concurrent producers through ring wraparound", "[ti
   for (size_t producer = 0; producer < producers; ++producer) {
     threads.emplace_back([state] {
       for (size_t i = 0; i < per_producer; ++i) {
-        QueueTimerOnce([state](void*) {
-          std::lock_guard lock(state->mutex);
-          ++state->count;
-          state->cv.notify_all();
-        }, nullptr, Clock::now());
+        QueueTimerOnce(
+            [state](void*) {
+              std::lock_guard lock(state->mutex);
+              ++state->count;
+              state->cv.notify_all();
+            },
+            nullptr, Clock::now());
       }
     });
   }
-  for (auto& thread : threads) thread.join();
+  for (auto& thread : threads)
+    thread.join();
   std::unique_lock lock(state->mutex);
-  CHECK(state->cv.wait_for(lock, 2s, [&] {
-    return state->count == producers * per_producer;
-  }));
+  CHECK(state->cv.wait_for(lock, 2s, [&] { return state->count == producers * per_producer; }));
 }

@@ -117,7 +117,8 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
 }
 
 CommandProcessor::~CommandProcessor() {
-  if (perf_csv_file_) std::fclose(perf_csv_file_);
+  if (perf_csv_file_)
+    std::fclose(perf_csv_file_);
 }
 
 bool CommandProcessor::Initialize() {
@@ -993,7 +994,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
     const uint64_t start = rex::chrono::Clock::QueryHostTickCount();
     IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
     const uint64_t end = rex::chrono::Clock::QueryHostTickCount();
-    if (!perf_csv_frame_) perf_csv_first_tick_ = start;
+    if (!perf_csv_frame_)
+      perf_csv_first_tick_ = start;
     const auto microseconds = [this](uint64_t ticks) {
       return uint64_t(double(ticks) * 1000000.0 / double(perf_csv_frequency_));
     };
@@ -1002,7 +1004,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
                  perf_csv_frame_ ? microseconds(start - perf_csv_last_tick_) : 0,
                  microseconds(end - start));
     perf_csv_last_tick_ = start;
-    if (++perf_csv_frame_ % 60 == 0) std::fflush(perf_csv_file_);
+    if (++perf_csv_frame_ % 60 == 0)
+      std::fflush(perf_csv_file_);
   } else {
     IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
   }
