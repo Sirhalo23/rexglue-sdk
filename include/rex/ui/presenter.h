@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <condition_variable>
@@ -412,6 +413,9 @@ class Presenter {
     uint32_t display_aspect_ratio_x;
     uint32_t display_aspect_ratio_y;
     bool is_8bpc;
+    // Which guest frame this is (counts refreshes), for measuring when new
+    // frames reach the screen.
+    uint64_t sequence = 0;
 
     GuestOutputProperties() { SetToInactive(); }
 
@@ -976,6 +980,29 @@ class Presenter {
   // with paint_mode_mutex_ held in this case, and guest output consumption
   // happens as part of painting.
   std::mutex guest_output_mailbox_consumer_mutex_;
+
+  // Frame pacing as shown on the screen ([present] in the log every 30 s).
+  // guest_output_sequence_ is the producer's count of refreshes; the consumer
+  // notes the sequence of the image it took, and each successful present of an
+  // image with a new sequence is a new guest frame reaching the screen.
+  uint64_t guest_output_sequence_ = 0;
+  std::atomic<uint64_t> consumed_guest_output_sequence_{0};
+  struct PresentStats {
+    std::chrono::steady_clock::time_point window_start{};
+    std::chrono::steady_clock::time_point last_new_frame{};
+    uint64_t last_sequence = 0;
+    uint64_t presents = 0;
+    uint64_t new_frames = 0;
+    // Spacing between new frames, in 0.25 ms steps up to 100 ms (the last
+    // bucket holds everything longer).
+    static constexpr size_t kBuckets = 401;
+    std::array<uint32_t, kBuckets> spacing{};
+    double spacing_sum_ms = 0.0;
+    double spacing_worst_ms = 0.0;
+  };
+  std::mutex present_stats_mutex_;
+  PresentStats present_stats_;
+  void RecordPresent();
 
   std::array<GuestOutputProperties, kGuestOutputMailboxSize> guest_output_properties_;
   // Accessible only by refreshing, whether the last refresh contained an image

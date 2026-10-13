@@ -192,6 +192,29 @@ void SyncMemory() {
   __sync_synchronize();
 }
 
+void PreciseSleepUntil(std::chrono::steady_clock::time_point deadline) {
+  // An absolute sleep on the monotonic clock (steady_clock's) wakes within a
+  // few tens of microseconds. No yielding at the end: on a busy machine a
+  // thread that yields loses its turn to another for a whole time slice, while
+  // one woken by its timer runs at once.
+#if defined(__APPLE__)
+  // No clock_nanosleep, and steady_clock is not CLOCK_MONOTONIC: sleep for the
+  // time that is left.
+  const auto remaining = deadline - std::chrono::steady_clock::now();
+  if (remaining > std::chrono::steady_clock::duration::zero()) {
+    Sleep(std::chrono::duration_cast<std::chrono::microseconds>(remaining));
+  }
+#else
+  const auto since_epoch = deadline.time_since_epoch();
+  const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
+  timespec until;
+  until.tv_sec = static_cast<time_t>(seconds.count());
+  until.tv_nsec = static_cast<long>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch - seconds).count());
+  while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, nullptr) == EINTR) {}
+#endif
+}
+
 void Sleep(std::chrono::microseconds duration) {
   timespec rqtp = DurationToTimeSpec(duration);
   timespec rmtp = {};

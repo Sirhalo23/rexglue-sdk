@@ -118,6 +118,13 @@ void Sleep(std::chrono::duration<Rep, Period> duration) {
   Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));
 }
 
+// Sleeps until the given steady-clock time and wakes close to it: an absolute
+// clock sleep on POSIX (within tens of microseconds); on Windows a
+// high-resolution waitable timer, with the last quarter of a millisecond spent
+// busy-waiting. For pacing that has to be even (the guest's vertical blank),
+// not for general waits.
+void PreciseSleepUntil(std::chrono::steady_clock::time_point deadline);
+
 enum class SleepResult {
   kSuccess,
   kAlerted,

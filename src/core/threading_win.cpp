@@ -101,6 +101,58 @@ void Sleep(std::chrono::microseconds duration) {
   }
 }
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+void PreciseSleepUntil(std::chrono::steady_clock::time_point deadline) {
+  using namespace std::chrono_literals;
+  using Clock = std::chrono::steady_clock;
+  // One timer per thread. The high-resolution kind (Windows 10 1803 and later)
+  // fires within about half a millisecond; the ordinary one only to the
+  // system timer's period (1 ms if the program asked for it, else 15.6 ms),
+  // so more of the end of the wait is spent yielding.
+  struct Timer {
+    HANDLE handle = nullptr;
+    bool high_resolution = false;
+    Timer() {
+      handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                      TIMER_ALL_ACCESS);
+      high_resolution = handle != nullptr;
+      if (!handle) {
+        handle = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+      }
+    }
+    ~Timer() {
+      if (handle) {
+        CloseHandle(handle);
+      }
+    }
+  };
+  thread_local Timer timer;
+  // The timer wakes the thread a little early, and the rest is a busy wait on
+  // the clock that keeps the processor (yielding would hand it to another
+  // thread for a whole time slice on a busy machine).
+  const Clock::duration margin =
+      timer.high_resolution ? Clock::duration(250us) : Clock::duration(1500us);
+  const Clock::duration remaining = deadline - Clock::now();
+  if (timer.handle && remaining > margin) {
+    LARGE_INTEGER due;
+    // Negative: relative, in 100 ns units.
+    due.QuadPart =
+        -std::chrono::duration_cast<std::chrono::nanoseconds>(remaining - margin).count() / 100;
+    if (SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0)) {
+      WaitForSingleObject(timer.handle, INFINITE);
+    }
+  } else if (!timer.handle && remaining > margin) {
+    ::Sleep(static_cast<DWORD>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining - margin).count()));
+  }
+  while (Clock::now() < deadline) {
+    YieldProcessor();
+  }
+}
+
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
   if (SleepEx(static_cast<DWORD>(duration.count() / 1000), TRUE) == WAIT_IO_COMPLETION) {
     return SleepResult::kAlerted;

@@ -32,6 +32,10 @@ REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
 
+REXCVAR_DEFINE_BOOL(log_present_pacing, true, "UI/Presenter",
+                    "Every 30 seconds, log how evenly new guest frames reached the screen "
+                    "([present]) and how many presents there were.");
+
 REXCVAR_DEFINE_BOOL(vsync_to_display, false, "UI/Presenter",
                     "Show each frame at the display's vertical blank (no tearing), and pace the "
                     "guest's vertical blank by the display's when its refresh rate is a whole "
@@ -564,6 +568,7 @@ bool Presenter::RefreshGuestOutput(
   writable_properties.display_aspect_ratio_x = display_aspect_ratio_x;
   writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
   writable_properties.is_8bpc = false;
+  writable_properties.sequence = ++guest_output_sequence_;
   bool is_active = writable_properties.IsActive();
   if (is_active) {
     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
@@ -851,6 +856,7 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
   // inactive.
   const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
   mailbox_index_or_max_if_inactive_out = properties.IsActive() ? mailbox_index : UINT32_MAX;
+  consumed_guest_output_sequence_.store(properties.sequence, std::memory_order_relaxed);
   if (properties_out) {
     *properties_out = properties;
   }
@@ -1505,6 +1511,9 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if (result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal) {
+    RecordPresent();
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;
@@ -1525,6 +1534,69 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
       break;
   }
   return result;
+}
+
+void Presenter::RecordPresent() {
+  if (!REXCVAR_GET(log_present_pacing)) {
+    return;
+  }
+  using Clock = std::chrono::steady_clock;
+  const Clock::time_point now = Clock::now();
+  const uint64_t sequence = consumed_guest_output_sequence_.load(std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(present_stats_mutex_);
+  PresentStats& stats = present_stats_;
+  if (stats.window_start == Clock::time_point{}) {
+    stats.window_start = now;
+  }
+  ++stats.presents;
+  if (sequence && sequence != stats.last_sequence) {
+    stats.last_sequence = sequence;
+    if (stats.last_new_frame != Clock::time_point{}) {
+      const double ms =
+          std::chrono::duration<double, std::milli>(now - stats.last_new_frame).count();
+      ++stats.new_frames;
+      stats.spacing_sum_ms += ms;
+      stats.spacing_worst_ms = std::max(stats.spacing_worst_ms, ms);
+      ++stats.spacing[std::min(PresentStats::kBuckets - 1, size_t(ms * 4.0))];
+    }
+    stats.last_new_frame = now;
+  }
+  const double seconds = std::chrono::duration<double>(now - stats.window_start).count();
+  if (seconds < 30.0) {
+    return;
+  }
+  if (stats.new_frames) {
+    const double average = stats.spacing_sum_ms / double(stats.new_frames);
+    // The 99th percentile from the buckets, and how many frames came much
+    // later or much sooner than average: even pacing has neither.
+    uint64_t seen = 0, p99_bucket = 0, long_gaps = 0, short_gaps = 0;
+    const uint64_t p99_rank = (stats.new_frames * 99 + 99) / 100;
+    for (size_t i = 0; i < PresentStats::kBuckets; ++i) {
+      const double bucket_ms = (double(i) + 0.5) / 4.0;
+      if (bucket_ms > average * 1.5)
+        long_gaps += stats.spacing[i];
+      if (bucket_ms < average * 0.5)
+        short_gaps += stats.spacing[i];
+      if (seen < p99_rank) {
+        seen += stats.spacing[i];
+        if (seen >= p99_rank)
+          p99_bucket = i;
+      }
+    }
+    REXLOG_INFO(
+        "[present] {:.0f} s: {} new frames shown ({:.1f}/s) in {} presents ({:.0f}/s); spacing "
+        "{:.1f} ms average, {:.1f} ms 99th percentile, {:.1f} ms worst; {} over 1.5x average, {} "
+        "under half",
+        seconds, stats.new_frames, double(stats.new_frames) / seconds, stats.presents,
+        double(stats.presents) / seconds, average, (double(p99_bucket) + 1.0) / 4.0,
+        stats.spacing_worst_ms, long_gaps, short_gaps);
+  }
+  const Clock::time_point last_new_frame = stats.last_new_frame;
+  const uint64_t last_sequence = stats.last_sequence;
+  stats = PresentStats();
+  stats.window_start = now;
+  stats.last_new_frame = last_new_frame;
+  stats.last_sequence = last_sequence;
 }
 
 void Presenter::HandleUIDrawersChangeFromUIThread(bool drawers_were_empty) {
