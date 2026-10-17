@@ -1173,10 +1173,10 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
   const bool wait_for_vblank = REXCVAR_GET(vsync_to_display);
   HRESULT present_result = paint_context_.swap_chain->Present(
       wait_for_vblank ? 1 : 0,
-      wait_for_vblank ? 0
-                      : DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
-                                                    ? DXGI_PRESENT_ALLOW_TEARING
-                                                    : 0));
+      wait_for_vblank
+          ? 0
+          : DXGI_PRESENT_RESTART |
+                (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
   if (wait_for_vblank && (!vblank_output_ || ++presents_since_output_refresh_ >= 120)) {
     presents_since_output_refresh_ = 0;
     Microsoft::WRL::ComPtr<IDXGIOutput> output;

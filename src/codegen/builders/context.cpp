@@ -42,16 +42,23 @@ std::string FuncletCopies(const RecompilerLocalVariables& locals, std::string_vi
     out += to_ctx ? fmt::format("ctx.{0} = {0};\n", local) : fmt::format("{0} = ctx.{0};\n", local);
   };
   for (size_t i = 0; i < 32; ++i)
-    if (locals.r[i]) copy(fmt::format("r{}", i));
+    if (locals.r[i])
+      copy(fmt::format("r{}", i));
   for (size_t i = 0; i < 32; ++i)
-    if (locals.f[i]) copy(fmt::format("f{}", i));
+    if (locals.f[i])
+      copy(fmt::format("f{}", i));
   for (size_t i = 0; i < 128; ++i)
-    if (locals.v[i]) copy(fmt::format("v{}", i));
+    if (locals.v[i])
+      copy(fmt::format("v{}", i));
   for (size_t i = 0; i < 8; ++i)
-    if (locals.cr[i]) copy(fmt::format("cr{}", i));
-  if (locals.ctr) copy("ctr");
-  if (locals.xer) copy("xer");
-  if (locals.reserved) copy("reserved");
+    if (locals.cr[i])
+      copy(fmt::format("cr{}", i));
+  if (locals.ctr)
+    copy("ctr");
+  if (locals.xer)
+    copy("xer");
+  if (locals.reserved)
+    copy("reserved");
   return out;
 }
 
@@ -67,7 +74,8 @@ std::string ExpandFuncletMarkers(const std::string& body, const RecompilerLocalV
   while (start < body.size()) {
     size_t end = body.find('\n', start);
     const size_t next = end == std::string::npos ? body.size() : end + 1;
-    if (end == std::string::npos) end = body.size();
+    if (end == std::string::npos)
+      end = body.size();
     const std::string_view line(body.data() + start, end - start);
     const size_t text = line.find_first_not_of('\t');
     const std::string_view content = text == std::string_view::npos ? line : line.substr(text);
@@ -125,8 +133,7 @@ std::string BuilderContext::r(size_t index) {
 }
 
 std::string BuilderContext::f(size_t index) {
-  if ((localizeNonArguments() && index == 0) ||
-      (localizeNonVolatiles() && index >= 14)) {
+  if ((localizeNonArguments() && index == 0) || (localizeNonVolatiles() && index >= 14)) {
     locals.f[index] = true;
     return fmt::format("f{}", index);
   }
