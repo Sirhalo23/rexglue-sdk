@@ -19,6 +19,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/ui/flags.h>
 #include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_util.h>
@@ -538,6 +539,15 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
       guest_output_resource_refresher_submission_tracker_.GetCurrentSubmission();
   guest_output_resource_refresher_submission_tracker_.NextSubmission();
   return refresher_succeeded;
+}
+
+bool D3D12Presenter::WaitForDisplayVerticalBlank() {
+  Microsoft::WRL::ComPtr<IDXGIOutput> output;
+  {
+    std::lock_guard<std::mutex> lock(vblank_output_mutex_);
+    output = vblank_output_;
+  }
+  return output && SUCCEEDED(output->WaitForVBlank());
 }
 
 void D3D12Presenter::PaintContext::DestroySwapChain() {
@@ -1155,9 +1165,27 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
   // fullscreen is ever used in, the allow tearing flag must not be passed in
   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
   // presentation model used in Direct3D 12).
+  //
+  // With vsync_to_display, wait for the display's vertical blank instead (no
+  // tearing). The guest's vertical blank is then paced by the display's (see
+  // WaitForDisplayVerticalBlank), so each frame is ready for the next one, and
+  // no queued frame is dropped.
+  const bool wait_for_vblank = REXCVAR_GET(vsync_to_display);
   HRESULT present_result = paint_context_.swap_chain->Present(
-      0, DXGI_PRESENT_RESTART |
-             (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
+      wait_for_vblank ? 1 : 0,
+      wait_for_vblank ? 0
+                      : DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
+                                                    ? DXGI_PRESENT_ALLOW_TEARING
+                                                    : 0));
+  if (wait_for_vblank && (!vblank_output_ || ++presents_since_output_refresh_ >= 120)) {
+    presents_since_output_refresh_ = 0;
+    Microsoft::WRL::ComPtr<IDXGIOutput> output;
+    if (FAILED(paint_context_.swap_chain->GetContainingOutput(&output))) {
+      output.Reset();
+    }
+    std::lock_guard<std::mutex> lock(vblank_output_mutex_);
+    vblank_output_ = std::move(output);
+  }
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.

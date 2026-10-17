@@ -32,6 +32,13 @@ REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
 
+REXCVAR_DEFINE_BOOL(vsync_to_display, false, "UI/Presenter",
+                    "Show each frame at the display's vertical blank (no tearing), and pace the "
+                    "guest's vertical blank by the display's when its refresh rate is a whole "
+                    "multiple of the guest's (60 or 120 Hz for a 60 Hz game). Direct3D 12 paces "
+                    "by the display; Vulkan only waits for it (FIFO presentation).")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_INT32(present_safe_area_x, 90, "UI/Presenter",
                      "Horizontal safe area percentage (0-100)")
     .range(0, 100);

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -27,7 +28,9 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/ui/flags.h>
 #include <rex/ui/graphics_provider.h>
+#include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
@@ -147,6 +150,15 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
                                  reinterpret_cast<runtime::MMIOWriteCallback>(WriteRegisterThunk));
 
   // Guest vblank timer based on the configured guest video mode.
+  //
+  // With vsync_to_display, the guest's vertical blank follows the display's
+  // instead when the presenter can wait for it (Direct3D 12) and the display
+  // refreshes at a whole multiple of the guest's rate (60 or 120 Hz for a
+  // 60 Hz title): the presenter then waits for the display's vertical blank
+  // too, and each guest frame lands on its own display refresh, without the
+  // drift between two clocks that otherwise repeats or drops a frame now and
+  // then. Any other display (or none) keeps the timer, checked again every
+  // few seconds since the window may move to another monitor.
   vsync_worker_running_ = true;
   vsync_worker_thread_ = system::object_ref<system::XHostThread>(
       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
@@ -158,15 +170,86 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+
+        // Pacing by the display.
+        constexpr uint32_t kDisplaySamples = 32;      // display refreshes measured first
+        constexpr double kDisplayTolerance = 0.02;    // how close to a whole multiple
+        const uint64_t display_retry_ticks = guest_tick_frequency * 5;
+        uint64_t display_next_try = last_frame_time;  // when to try the display (again)
+        uint64_t display_last = 0;                    // time of the last display vblank
+        double display_interval = 0.0;                // average display refresh interval
+        uint32_t display_samples = 0;
+        uint32_t display_per_guest = 0;  // display vblanks per guest vblank, 0 = timer
+        uint32_t display_count = 0;
+        bool display_reported = false;
+        auto stop_display_pacing = [&](uint64_t now, const char* why) {
+          if (display_per_guest || !display_reported) {
+            REXGPU_INFO("Guest vertical blank: from a timer ({})", why);
+            display_reported = true;
+          }
+          display_per_guest = 0;
+          display_samples = 0;
+          display_last = 0;
+          display_next_try = now + display_retry_ticks;
+        };
+
         while (vsync_worker_running_) {
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
-          uint64_t interval_ticks =
-              REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+          const bool vsync_on = REXCVAR_GET(vsync);
+          bool waited_for_display = false;
+          if (vsync_on && REXCVAR_GET(vsync_to_display) && current_time >= display_next_try) {
+            ui::Presenter* presenter = presenter_.get();
+            if (presenter && presenter->WaitForDisplayVerticalBlank()) {
+              waited_for_display = true;
+              current_time = chrono::Clock::QueryGuestTickCount();
+              if (display_last) {
+                const double interval = double(current_time - display_last);
+                display_interval = display_samples ? display_interval * 0.95 + interval * 0.05
+                                                   : interval;
+                ++display_samples;
+              }
+              display_last = current_time;
+              if (display_samples >= kDisplaySamples) {
+                const double per_guest = double(vsync_interval_ticks) / display_interval;
+                const long whole = std::lround(per_guest);
+                if (whole >= 1 && whole <= 8 &&
+                    std::abs(per_guest - double(whole)) <= kDisplayTolerance * double(whole)) {
+                  if (display_per_guest != uint32_t(whole)) {
+                    display_per_guest = uint32_t(whole);
+                    display_count = 0;
+                    REXGPU_INFO(
+                        "Guest vertical blank: from the display ({:.2f} Hz, every {} refresh{})",
+                        double(guest_tick_frequency) / display_interval, display_per_guest,
+                        display_per_guest == 1 ? "" : "es");
+                    display_reported = true;
+                  }
+                  // Never faster than twice the guest rate, whatever the display
+                  // reports (a vertical blank wait may return early).
+                  if (++display_count >= display_per_guest &&
+                      current_time - last_frame_time >= vsync_interval_ticks / 2) {
+                    display_count = 0;
+                    MarkVblank();
+                    last_frame_time = current_time;
+                  }
+                  continue;
+                }
+                stop_display_pacing(current_time, "the display's refresh rate is not a whole "
+                                                  "multiple of the game's");
+              }
+            } else {
+              stop_display_pacing(current_time, "the display's vertical blank is not available");
+            }
+          } else if (display_per_guest) {
+            stop_display_pacing(current_time, "vsync_to_display or vsync is off");
+          }
+          uint64_t interval_ticks = vsync_on ? vsync_interval_ticks : no_vsync_interval_ticks;
           while (current_time - last_frame_time >= interval_ticks) {
             MarkVblank();
             last_frame_time += interval_ticks;
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+          if (!waited_for_display) {
+            rex::thread::Sleep(std::chrono::milliseconds(1));
+          }
         }
         return 0;
       }));
