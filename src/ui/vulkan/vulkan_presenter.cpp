@@ -1387,8 +1387,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   if (REXCVAR_GET(vsync_to_display)) {
     swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   } else if (REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
-      std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) !=
-          present_modes.cend()) {
+             std::find(present_modes.cbegin(), present_modes.cend(),
+                       VK_PRESENT_MODE_IMMEDIATE_KHR) != present_modes.cend()) {
     // Allowing tearing to reduce latency, and possibly variable refresh rate
     // (though on Windows with borderless fullscreen, GDI copying is used
     // instead of independent flip, so it's not supported there).

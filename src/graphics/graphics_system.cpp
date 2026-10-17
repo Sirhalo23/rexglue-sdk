@@ -187,8 +187,8 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
 
         // Pacing by the display.
-        constexpr uint32_t kDisplaySamples = 32;      // display refreshes measured first
-        constexpr double kDisplayTolerance = 0.02;    // how close to a whole multiple
+        constexpr uint32_t kDisplaySamples = 32;    // display refreshes measured first
+        constexpr double kDisplayTolerance = 0.02;  // how close to a whole multiple
         const uint64_t display_retry_ticks = guest_tick_frequency * 5;
         uint64_t display_next_try = last_frame_time;  // when to try the display (again)
         uint64_t display_last = 0;                    // time of the last display vblank
@@ -255,8 +255,8 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
               current_time = chrono::Clock::QueryGuestTickCount();
               if (display_last) {
                 const double interval = double(current_time - display_last);
-                display_interval = display_samples ? display_interval * 0.95 + interval * 0.05
-                                                   : interval;
+                display_interval =
+                    display_samples ? display_interval * 0.95 + interval * 0.05 : interval;
                 ++display_samples;
               }
               display_last = current_time;
@@ -286,8 +286,9 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
                   }
                   continue;
                 }
-                stop_display_pacing(current_time, "the display's refresh rate is not a whole "
-                                                  "multiple of the game's");
+                stop_display_pacing(current_time,
+                                    "the display's refresh rate is not a whole "
+                                    "multiple of the game's");
               }
             } else {
               stop_display_pacing(current_time, "the display's vertical blank is not available");
