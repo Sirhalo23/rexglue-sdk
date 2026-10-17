@@ -290,6 +290,12 @@ namespace ui {
 
 void Presenter::FatalErrorHostGpuLossCallback([[maybe_unused]] bool is_responsible,
                                               [[maybe_unused]] bool statically_from_ui_thread) {
+  // FatalError only writes to the console, which players do not see: put the
+  // reason in the log, and make sure it reaches the file before the abort.
+  REXLOG_ERROR(
+      "Graphics device lost while presenting (the graphics driver reset or hung, "
+      "or the card was removed); ending");
+  rex::FlushLogging();
   rex::FatalError("Graphics device lost (probably due to an internal error)");
 }
 

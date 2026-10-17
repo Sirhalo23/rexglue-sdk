@@ -68,7 +68,16 @@ void SilentAudioDriver::Run() {
     if (next_done < now - kFrameDuration) {
       next_done = now + kFrameDuration;  // ran dry: start again from now
     }
-    if (wake_.wait_until(lock, next_done, [this] { return stop_; })) {
+    // Sleep until the frame is due (at most one frame, 5.3 ms). Not a timed
+    // condition-variable wait: with Microsoft's standard library that needs a
+    // 128-bit division helper the Windows build does not link.
+    const Clock::duration until_done = next_done - Clock::now();
+    if (until_done > Clock::duration::zero()) {
+      lock.unlock();
+      rex::thread::Sleep(std::chrono::duration_cast<std::chrono::microseconds>(until_done));
+      lock.lock();
+    }
+    if (stop_) {
       return;
     }
     uint32_t done = 0;
