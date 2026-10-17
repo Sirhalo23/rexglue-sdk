@@ -13,12 +13,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include <rex/cvar.h>
 #include <rex/graphics/command_processor.h>
@@ -41,6 +44,10 @@ REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, 
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
                     "runtime spikes and freezes when playing the game not for the first time.");
+
+REXCVAR_DEFINE_BOOL(vblank_precise_timer, true, "GPU",
+                    "Time the guest's vertical blank by sleeping until each one is due "
+                    "(high-resolution timer) instead of checking the clock every millisecond.");
 
 namespace {
 
@@ -162,6 +169,14 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
   vsync_worker_running_ = true;
   vsync_worker_thread_ = system::object_ref<system::XHostThread>(
       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
+#if REX_PLATFORM_WIN32
+        // This thread does almost nothing but has to wake on time: on a PC
+        // whose cores are all busy with the game, a normal-priority thread
+        // waits for a time slice and the vertical blank arrives late.
+        if (auto* thread = rex::thread::Thread::GetCurrentThread()) {
+          thread->set_priority(rex::thread::ThreadPriority::kHighest);
+        }
+#endif
         system::X_VIDEO_MODE video_mode;
         kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
         double refresh_rate_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
@@ -182,6 +197,42 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint32_t display_per_guest = 0;  // display vblanks per guest vblank, 0 = timer
         uint32_t display_count = 0;
         bool display_reported = false;
+
+        // Timer pacing: each guest vertical blank is due exactly one interval
+        // after the previous one. The thread sleeps until that moment
+        // (PreciseSleepUntil) rather than waking every millisecond to look,
+        // which on Windows without a 1 ms system timer meant every 15.6 ms and
+        // an uneven 60 Hz. How late the ticks fire is logged every 30 s.
+        const double host_ns_per_guest_tick = 1e9 / double(guest_tick_frequency);
+        const uint64_t stats_interval_ticks = guest_tick_frequency * 30;
+        uint64_t stats_start = last_frame_time;
+        uint64_t timer_ticks = 0;     // vertical blanks from the timer since stats_start
+        uint64_t timer_late_sum = 0;  // their lateness, guest ticks
+        uint64_t timer_late_worst = 0;
+        uint64_t timer_late_over_1ms = 0;
+        uint64_t display_ticks = 0;  // vertical blanks from the display
+        auto log_vblank_stats = [&](uint64_t now) {
+          if (now - stats_start < stats_interval_ticks) {
+            return;
+          }
+          const double seconds = double(now - stats_start) / double(guest_tick_frequency);
+          if (timer_ticks) {
+            REXGPU_INFO(
+                "[vblank] {:.0f} s: {} from the timer, late by {:.3f} ms on average, worst "
+                "{:.2f} ms, {} over 1 ms{}",
+                seconds, timer_ticks,
+                double(timer_late_sum) / double(timer_ticks) * host_ns_per_guest_tick / 1e6,
+                double(timer_late_worst) * host_ns_per_guest_tick / 1e6, timer_late_over_1ms,
+                display_ticks ? fmt::format("; {} from the display", display_ticks) : "");
+          } else if (display_ticks) {
+            REXGPU_INFO("[vblank] {:.0f} s: {} from the display", seconds, display_ticks);
+          }
+          stats_start = now;
+          timer_ticks = timer_late_sum = timer_late_worst = timer_late_over_1ms = 0;
+          display_ticks = 0;
+        };
+        const uint64_t one_ms_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
+
         auto stop_display_pacing = [&](uint64_t now, const char* why) {
           if (display_per_guest || !display_reported) {
             REXGPU_INFO("Guest vertical blank: from a timer ({})", why);
@@ -230,6 +281,8 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
                     display_count = 0;
                     MarkVblank();
                     last_frame_time = current_time;
+                    ++display_ticks;
+                    log_vblank_stats(current_time);
                   }
                   continue;
                 }
@@ -245,9 +298,29 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
           uint64_t interval_ticks = vsync_on ? vsync_interval_ticks : no_vsync_interval_ticks;
           while (current_time - last_frame_time >= interval_ticks) {
             MarkVblank();
+            const uint64_t late = current_time - (last_frame_time + interval_ticks);
+            if (vsync_on) {
+              ++timer_ticks;
+              timer_late_sum += late;
+              timer_late_worst = std::max(timer_late_worst, late);
+              timer_late_over_1ms += late > one_ms_ticks ? 1 : 0;
+            }
             last_frame_time += interval_ticks;
           }
-          if (!waited_for_display) {
+          log_vblank_stats(current_time);
+          if (waited_for_display) {
+            continue;
+          }
+          if (vsync_on && REXCVAR_GET(vblank_precise_timer)) {
+            // Sleep until the next vertical blank is due (at most 50 ms, so a
+            // change of settings or shutdown is noticed).
+            const uint64_t due = last_frame_time + interval_ticks;
+            const uint64_t wait_ticks =
+                std::min(due - std::min(due, current_time), guest_tick_frequency / 20);
+            rex::thread::PreciseSleepUntil(
+                std::chrono::steady_clock::now() +
+                std::chrono::nanoseconds(int64_t(double(wait_ticks) * host_ns_per_guest_tick)));
+          } else {
             rex::thread::Sleep(std::chrono::milliseconds(1));
           }
         }
