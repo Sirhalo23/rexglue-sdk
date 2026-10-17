@@ -12,6 +12,8 @@
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
+#include <rex/audio/silent_audio_driver.h>
+#include <rex/logging.h>
 
 namespace rex::audio::sdl {
 
@@ -36,7 +38,12 @@ X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
   if (!driver->Initialize()) {
     driver->Shutdown();
     delete driver;
-    return X_STATUS_UNSUCCESSFUL;
+    // No device could be opened. On the console registering an audio client
+    // always works, and games are not written to cope with it failing (Ridge
+    // Racer 6 crashes on a null object within seconds). Run without sound.
+    REXAPU_WARN("No audio device could be opened; running without sound");
+    *out_driver = new SilentAudioDriver(memory_, semaphore);
+    return X_STATUS_SUCCESS;
   }
 
   *out_driver = driver;
@@ -45,6 +52,10 @@ X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
 
 void SDLAudioSystem::DestroyDriver(AudioDriver* driver) {
   assert_not_null(driver);
+  if (auto silent = dynamic_cast<SilentAudioDriver*>(driver)) {
+    delete silent;
+    return;
+  }
   auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver);
   assert_not_null(sdldriver);
   sdldriver->Shutdown();
