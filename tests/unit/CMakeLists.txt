@@ -19,6 +19,7 @@ add_executable(unit_tests
     codegen/codegen_writer_test.cpp
     codegen/output_partition_test.cpp
     codegen/output_stamp_test.cpp
+    codegen/funclet_handover_test.cpp
 )
 
 target_sources(unit_tests PRIVATE

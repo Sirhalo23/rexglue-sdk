@@ -609,6 +609,8 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     emit_println(body, "\t\t}} SEH_CATCH_ALL {{");
     emit_println(body, "\t\t\tREXLOG_WARN(\"SEH exception caught in sub_{:08X}\");", base());
 
+    // The handlers below run on this function's registers: hand them over.
+    emit_println(body, "\t\t\t{}", kFuncletHandOverMarker);
     if (sehInfo->frameSize > 0) {
       emit_println(body, "\t\t\tctx.r12.s64 = ctx.r31.s64 + {};  // Establisher frame pointer",
                    sehInfo->frameSize);
@@ -636,6 +638,9 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   } else {
     emit_println(body, "}}\n");
   }
+
+  // Calls to SEH funclets: copy the localized registers into ctx and back.
+  body = ExpandFuncletMarkers(body, localVariables);
 
   // --- Emit local variable declarations, then body ---
   if (localVariables.ctr)

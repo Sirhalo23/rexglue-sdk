@@ -27,6 +27,61 @@ namespace rex::codegen {
 static constexpr uint32_t kEieioEncoding = 0xAC06007C;
 
 //=============================================================================
+// SEH funclet register hand-over
+//=============================================================================
+
+namespace {
+
+// Copies between every localized register and ctx, one statement per line,
+// each line starting with `indent`.
+std::string FuncletCopies(const RecompilerLocalVariables& locals, std::string_view indent,
+                          bool to_ctx) {
+  std::string out;
+  auto copy = [&](const std::string& local) {
+    out += indent;
+    out += to_ctx ? fmt::format("ctx.{0} = {0};\n", local) : fmt::format("{0} = ctx.{0};\n", local);
+  };
+  for (size_t i = 0; i < 32; ++i)
+    if (locals.r[i]) copy(fmt::format("r{}", i));
+  for (size_t i = 0; i < 32; ++i)
+    if (locals.f[i]) copy(fmt::format("f{}", i));
+  for (size_t i = 0; i < 128; ++i)
+    if (locals.v[i]) copy(fmt::format("v{}", i));
+  for (size_t i = 0; i < 8; ++i)
+    if (locals.cr[i]) copy(fmt::format("cr{}", i));
+  if (locals.ctr) copy("ctr");
+  if (locals.xer) copy("xer");
+  if (locals.reserved) copy("reserved");
+  return out;
+}
+
+}  // namespace
+
+std::string ExpandFuncletMarkers(const std::string& body, const RecompilerLocalVariables& locals) {
+  if (body.find("//@rex funclet ") == std::string::npos) {
+    return body;
+  }
+  std::string out;
+  out.reserve(body.size());
+  size_t start = 0;
+  while (start < body.size()) {
+    size_t end = body.find('\n', start);
+    const size_t next = end == std::string::npos ? body.size() : end + 1;
+    if (end == std::string::npos) end = body.size();
+    const std::string_view line(body.data() + start, end - start);
+    const size_t text = line.find_first_not_of('\t');
+    const std::string_view content = text == std::string_view::npos ? line : line.substr(text);
+    if (content == kFuncletHandOverMarker || content == kFuncletTakeBackMarker) {
+      out += FuncletCopies(locals, line.substr(0, text), content == kFuncletHandOverMarker);
+    } else {
+      out.append(body, start, next - start);
+    }
+    start = next;
+  }
+  return out;
+}
+
+//=============================================================================
 // Convenience Accessors
 //=============================================================================
 
@@ -42,16 +97,26 @@ const FunctionGraph& BuilderContext::graph() const {
 // Register Accessors
 //=============================================================================
 
-// Localizing a non-volatile assumes the function owns it across its whole body.
-// An SEH funclet does not: it inherits its owner's live registers through ctx.
+// Localizing a register assumes the function owns it across its whole body.
+// An SEH funclet does not: it runs on its owner's frame and inherits every
+// register the owner left live through ctx (a __finally block typically reads
+// r12, the establisher frame, before writing anything). A local would start at
+// zero, so a funclet keeps all of its registers in ctx; the owner hands its own
+// locals over around the call (emit_function_call, FunctionGraph).
+bool BuilderContext::mayLocalize() const {
+  return !fn.sharesRegisters();
+}
+
 bool BuilderContext::localizeNonVolatiles() const {
-  return config().nonVolatileRegistersAsLocalVariables && !fn.sharesRegisters();
+  return config().nonVolatileRegistersAsLocalVariables && mayLocalize();
+}
+
+bool BuilderContext::localizeNonArguments() const {
+  return config().nonArgumentRegistersAsLocalVariables && mayLocalize();
 }
 
 std::string BuilderContext::r(size_t index) {
-  const auto& cfg = config();
-  if ((cfg.nonArgumentRegistersAsLocalVariables &&
-       (index == 0 || index == 2 || index == 11 || index == 12)) ||
+  if ((localizeNonArguments() && (index == 0 || index == 2 || index == 11 || index == 12)) ||
       (localizeNonVolatiles() && index >= 14)) {
     locals.r[index] = true;
     return fmt::format("r{}", index);
@@ -60,8 +125,7 @@ std::string BuilderContext::r(size_t index) {
 }
 
 std::string BuilderContext::f(size_t index) {
-  const auto& cfg = config();
-  if ((cfg.nonArgumentRegistersAsLocalVariables && index == 0) ||
+  if ((localizeNonArguments() && index == 0) ||
       (localizeNonVolatiles() && index >= 14)) {
     locals.f[index] = true;
     return fmt::format("f{}", index);
@@ -70,8 +134,7 @@ std::string BuilderContext::f(size_t index) {
 }
 
 std::string BuilderContext::v(size_t index) {
-  const auto& cfg = config();
-  if ((cfg.nonArgumentRegistersAsLocalVariables && (index >= 32 && index <= 63)) ||
+  if ((localizeNonArguments() && (index >= 32 && index <= 63)) ||
       (localizeNonVolatiles() && ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
     locals.v[index] = true;
     return fmt::format("v{}", index);
@@ -80,7 +143,7 @@ std::string BuilderContext::v(size_t index) {
 }
 
 std::string BuilderContext::cr(size_t index) {
-  if (config().crRegistersAsLocalVariables) {
+  if (config().crRegistersAsLocalVariables && mayLocalize()) {
     locals.cr[index] = true;
     return fmt::format("cr{}", index);
   }
@@ -88,7 +151,7 @@ std::string BuilderContext::cr(size_t index) {
 }
 
 const char* BuilderContext::ctr() {
-  if (config().ctrAsLocalVariable) {
+  if (config().ctrAsLocalVariable && mayLocalize()) {
     locals.ctr = true;
     return "ctr";
   }
@@ -96,7 +159,7 @@ const char* BuilderContext::ctr() {
 }
 
 const char* BuilderContext::xer() {
-  if (config().xerAsLocalVariable) {
+  if (config().xerAsLocalVariable && mayLocalize()) {
     locals.xer = true;
     return "xer";
   }
@@ -104,7 +167,7 @@ const char* BuilderContext::xer() {
 }
 
 const char* BuilderContext::reserved() {
-  if (config().reservedRegisterAsLocalVariable) {
+  if (config().reservedRegisterAsLocalVariable && mayLocalize()) {
     locals.reserved = true;
     return "reserved";
   }
@@ -208,21 +271,17 @@ void BuilderContext::emit_function_call(uint32_t address) {
         return;
       }
 
-      // An SEH funclet runs on its owner's frame and reads whatever non-volatiles
-      // the owner left live, so hand it the localized copies through ctx and take
-      // them back afterwards. Only registers already localized here can be live at
-      // this point, so that set is the whole live-in the funclet can see.
-      if (targetFn->sharesRegisters() && localizeNonVolatiles()) {
-        for (size_t i = 14; i < 32; ++i) {
-          if (locals.r[i])
-            println("\tctx.r{} = r{};", i, i);
-        }
+      // An SEH funclet runs on its owner's frame and reads whatever registers
+      // the owner left live, so hand it every localized register through ctx and
+      // take them back afterwards, as on the hardware. Which registers are
+      // locals is only known once the whole function has been emitted (a loop
+      // can write one after this point), so markers are emitted here and
+      // FunctionGraph expands them.
+      if (targetFn->sharesRegisters()) {
+        println("\t{}", kFuncletHandOverMarker);
         emitCtx.reference(name);
         println("\t{}(ctx, base);", name);
-        for (size_t i = 14; i < 32; ++i) {
-          if (locals.r[i])
-            println("\tr{} = ctx.r{};", i, i);
-        }
+        println("\t{}", kFuncletTakeBackMarker);
         return;
       }
 
