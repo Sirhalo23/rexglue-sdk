@@ -71,12 +71,18 @@ void SilentAudioDriver::Run() {
     if (wake_.wait_until(lock, next_done, [this] { return stop_; })) {
       return;
     }
+    // Frames whose time has come, at most those submitted. Worked out with an
+    // explicit 64-bit division: written as a loop, the optimizer turns it into
+    // a 128-bit one (__udivti3), which the Windows build does not link.
     uint32_t done = 0;
-    const Clock::time_point after = Clock::now();
-    while (played < submitted_ && next_done <= after) {
-      ++played;
-      ++done;
-      next_done += kFrameDuration;
+    const Clock::duration behind = Clock::now() - next_done;
+    if (behind >= Clock::duration::zero()) {
+      const int64_t due = behind.count() / kFrameDuration.count() + 1;
+      const uint64_t waiting = submitted_ - played;
+      const uint64_t count = std::min<uint64_t>(waiting, static_cast<uint64_t>(due));
+      played += count;
+      done = static_cast<uint32_t>(count);
+      next_done += kFrameDuration * static_cast<int64_t>(count);
     }
     if (done) {
       lock.unlock();
