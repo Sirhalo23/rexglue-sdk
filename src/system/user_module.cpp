@@ -62,39 +62,40 @@ X_STATUS UserModule::LoadFromFile(const std::string_view path) {
   path_ = fs_entry->absolute_path();
   name_ = rex::string::utf8_find_base_name_from_guest_path(path_);
 
-  // If the FS supports mapping, map the file in and load from that.
+  // If the FS supports mapping, map the file in and load from that. Some file
+  // systems map files badly or not at all; read the file in that case.
+  bool loaded = false;
   if (fs_entry->can_map()) {
-    // Map.
     auto mmap = fs_entry->OpenMapped(memory::MappedMemory::Mode::kRead);
-    if (!mmap) {
-      return result;
+    if (mmap) {
+      result = LoadFromMemory(mmap->data(), mmap->size());
+      loaded = true;
+    } else {
+      REXSYS_WARN("Could not map {} into memory; reading it instead", path);
     }
-
-    // Load the module.
-    result = LoadFromMemory(mmap->data(), mmap->size());
-  } else {
+  }
+  if (!loaded) {
     std::vector<uint8_t> buffer(fs_entry->size());
 
     // Open file for reading.
     rex::filesystem::File* file = nullptr;
     result = fs_entry->Open(rex::filesystem::FileAccess::kGenericRead, &file);
     if (XFAILED(result)) {
+      REXSYS_ERROR("Could not open {}: status {:08X}", path, result);
       return result;
     }
 
     // Read entire file into memory.
-    // Ugh.
     size_t bytes_read = 0;
     result = file->ReadSync(std::span<uint8_t>(buffer), 0, &bytes_read);
+    file->Destroy();
     if (XFAILED(result)) {
+      REXSYS_ERROR("Could not read {}: status {:08X}", path, result);
       return result;
     }
 
     // Load the module.
     result = LoadFromMemory(buffer.data(), bytes_read);
-
-    // Close the file.
-    file->Destroy();
   }
 
   // Only XEX returns X_STATUS_PENDING
@@ -148,6 +149,7 @@ X_STATUS UserModule::LoadFromMemory(const void* addr, const size_t length) {
     // Create XexModule to parse and load the XEX image into guest memory
     auto xex_module = new runtime::XexModule(dispatcher, kernel_state_);
     if (!xex_module->Load(name_, path_, addr, length)) {
+      REXSYS_ERROR("Could not decode {} ({} bytes) as an Xbox 360 executable", path_, length);
       delete xex_module;
       return X_STATUS_UNSUCCESSFUL;
     }
