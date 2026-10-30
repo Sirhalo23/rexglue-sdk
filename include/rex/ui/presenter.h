@@ -993,10 +993,10 @@ class Presenter {
     uint64_t last_sequence = 0;
     uint64_t presents = 0;
     uint64_t new_frames = 0;
-    // Spacing between new frames, in 0.25 ms steps up to 100 ms (the last
-    // bucket holds everything longer).
-    static constexpr size_t kBuckets = 401;
-    std::array<uint32_t, kBuckets> spacing{};
+    // Spacing between new frames, in milliseconds (about 1800 in 30 s at
+    // 60 frames per second; kept up to kMaxSpacings).
+    static constexpr size_t kMaxSpacings = 65536;
+    std::vector<float> spacings;
     double spacing_sum_ms = 0.0;
     double spacing_worst_ms = 0.0;
   };

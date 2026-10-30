@@ -1563,7 +1563,9 @@ void Presenter::RecordPresent() {
       ++stats.new_frames;
       stats.spacing_sum_ms += ms;
       stats.spacing_worst_ms = std::max(stats.spacing_worst_ms, ms);
-      ++stats.spacing[std::min(PresentStats::kBuckets - 1, size_t(ms * 4.0))];
+      if (stats.spacings.size() < PresentStats::kMaxSpacings) {
+        stats.spacings.push_back(static_cast<float>(ms));
+      }
     }
     stats.last_new_frame = now;
   }
@@ -1573,29 +1575,27 @@ void Presenter::RecordPresent() {
   }
   if (stats.new_frames) {
     const double average = stats.spacing_sum_ms / double(stats.new_frames);
-    // The 99th percentile from the buckets, and how many frames came much
-    // later or much sooner than average: even pacing has neither.
-    uint64_t seen = 0, p99_bucket = 0, long_gaps = 0, short_gaps = 0;
-    const uint64_t p99_rank = (stats.new_frames * 99 + 99) / 100;
-    for (size_t i = 0; i < PresentStats::kBuckets; ++i) {
-      const double bucket_ms = (double(i) + 0.5) / 4.0;
-      if (bucket_ms > average * 1.5)
-        long_gaps += stats.spacing[i];
-      if (bucket_ms < average * 0.5)
-        short_gaps += stats.spacing[i];
-      if (seen < p99_rank) {
-        seen += stats.spacing[i];
-        if (seen >= p99_rank)
-          p99_bucket = i;
-      }
+    // The 99th percentile, and how many frames came much later or much
+    // sooner than average: even pacing has neither.
+    std::vector<float>& spacings = stats.spacings;
+    uint64_t long_gaps = 0, short_gaps = 0;
+    for (const float ms : spacings) {
+      long_gaps += ms > average * 1.5 ? 1 : 0;
+      short_gaps += ms < average * 0.5 ? 1 : 0;
+    }
+    double p99 = 0.0;
+    if (!spacings.empty()) {
+      const size_t rank = std::min(spacings.size() - 1, (spacings.size() * 99) / 100);
+      std::nth_element(spacings.begin(), spacings.begin() + rank, spacings.end());
+      p99 = spacings[rank];
     }
     REXLOG_INFO(
         "[present] {:.0f} s: {} new frames shown ({:.1f}/s) in {} presents ({:.0f}/s); spacing "
         "{:.1f} ms average, {:.1f} ms 99th percentile, {:.1f} ms worst; {} over 1.5x average, {} "
         "under half",
         seconds, stats.new_frames, double(stats.new_frames) / seconds, stats.presents,
-        double(stats.presents) / seconds, average, (double(p99_bucket) + 1.0) / 4.0,
-        stats.spacing_worst_ms, long_gaps, short_gaps);
+        double(stats.presents) / seconds, average, p99, stats.spacing_worst_ms, long_gaps,
+        short_gaps);
   }
   const Clock::time_point last_new_frame = stats.last_new_frame;
   const uint64_t last_sequence = stats.last_sequence;
