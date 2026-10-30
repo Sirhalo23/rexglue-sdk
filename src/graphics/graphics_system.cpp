@@ -374,6 +374,9 @@ void GraphicsSystem::OnHostGpuLossFromAnyThread([[maybe_unused]] bool is_respons
   if (host_gpu_loss_reported_.test_and_set(std::memory_order_relaxed)) {
     return;
   }
+  // FatalError only writes to the console, which players do not see.
+  REXGPU_ERROR("Graphics device lost (the graphics driver reset or hung); ending");
+  rex::FlushLogging();
   rex::FatalError("Graphics device lost (probably due to an internal error)");
 }
 
